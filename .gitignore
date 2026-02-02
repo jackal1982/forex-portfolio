@@ -1,0 +1,33 @@
+
+# 依賴庫
+node_modules/
+.pnp
+.pnp.js
+
+# 建置輸出
+dist/
+build/
+*.pnpm-debug.log*
+
+# 環境變數 (重要：防止 API Key 洩漏)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 測試
+/coverage
+
+# 編輯器與系統檔案
+.DS_Store
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# TypeScript 暫存
+*.tsbuildinfo
