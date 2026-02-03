@@ -1,54 +1,78 @@
 
 import { Transaction } from '../types';
 import { BOT_CURRENCIES, GOOGLE_SHEET_WEBAPP_URL } from '../constants';
+import { GoogleGenAI } from "@google/genai";
 
 export const verifyPasswordWithBackend = async (password: string): Promise<boolean> => {
   if (!GOOGLE_SHEET_WEBAPP_URL) return false;
   try {
     const response = await fetch(GOOGLE_SHEET_WEBAPP_URL, {
       method: 'POST',
-      mode: 'cors', // 注意：驗證需要回應，所以這裡不用 no-cors，但 Apps Script 回應 cors 有時較難處理
       body: JSON.stringify({ type: 'auth', password })
     });
-    // 如果 Apps Script 沒設定好 CORS，fetch 可能會失敗
-    // 另一種方式是讓 App Script 成功才回傳資料，失敗報錯
     const result = await response.json();
     return result.success === true;
   } catch (e) {
-    // 備選方案：如果發生 CORS 問題，通常我們會假設本地開發或環境受限
-    console.warn('驗證 API 調用失敗，請確認 Apps Script 已正確部署並開啟所有人存取');
+    console.warn('驗證 API 調用失敗');
     return false;
   }
 };
 
 /**
- * 透過台灣銀行官方 CSV 獲取即時匯率
+ * 透過 Google Search 工具利用 Gemini 獲取最新匯率 (作為最終備援)
  */
-export const fetchExchangeRates = async (): Promise<Record<string, number>> => {
+export const fetchRatesViaAI = async (): Promise<{rates: Record<string, number>, source: string}> => {
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: "請查詢台灣銀行目前的即時匯率(Spot Buy Rate)，並以 JSON 格式回傳主要幣別(USD, HKD, GBP, AUD, CAD, SGD, CHF, JPY, EUR, CNY)對台幣的匯率。格式如: {\"USD\": 32.12, ...}",
+      config: {
+        tools: [{ googleSearch: {} }],
+        responseMimeType: "application/json"
+      },
+    });
+    
+    const text = response.text;
+    if (text) {
+      const cleanedText = text.replace(/```json|```/g, '').trim();
+      const rates = JSON.parse(cleanedText);
+      return { rates, source: 'Gemini AI Search' };
+    }
+  } catch (e) {
+    console.error("AI 獲取匯率失敗", e);
+  }
+  return { rates: {}, source: 'Error' };
+};
+
+/**
+ * 透過台灣銀行官方 CSV 獲取即時匯率 (增加更多 Proxy 並優化解析)
+ */
+export const fetchExchangeRates = async (): Promise<{rates: Record<string, number>, source: string}> => {
   const BOT_CSV_URL = 'https://rate.bot.com.tw/xrt/flcsv/0/day';
   
   const proxies = [
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`
   ];
 
   const fallbackRates: Record<string, number> = {
-    'USD': 32.20, 'HKD': 4.10, 'GBP': 40.80, 'AUD': 21.10,
-    'CAD': 23.40, 'SGD': 24.00, 'CHF': 36.30, 'JPY': 0.210,
-    'EUR': 34.80, 'CNY': 4.43
+    'USD': 32.25, 'HKD': 4.12, 'GBP': 40.85, 'AUD': 21.15,
+    'CAD': 23.45, 'SGD': 24.10, 'CHF': 36.35, 'JPY': 0.211,
+    'EUR': 34.85, 'CNY': 4.45
   };
 
   const parseBOTCsv = (csvText: string): Record<string, number> => {
     const rates: Record<string, number> = {};
     const lines = csvText.split(/\r?\n/);
     
-    lines.forEach((line, index) => {
-      if (index === 0 || !line.trim()) return;
-      
+    lines.forEach((line) => {
       const columns = line.split(',');
       if (columns.length < 15) return;
 
       const currencyCode = columns[0].trim();
+      // 台銀 CSV 第 13 欄是即時買入價 (Spot Buy)，即我們賣給銀行的價格
       const spotBuy = parseFloat(columns[13]);
 
       if (currencyCode && !isNaN(spotBuy) && spotBuy > 0) {
@@ -64,31 +88,19 @@ export const fetchExchangeRates = async (): Promise<Record<string, number>> => {
       const response = await fetch(proxyUrl);
       if (!response.ok) continue;
 
-      let csvContent = "";
-      if (proxyUrl.includes('allorigins')) {
-        const json = await response.json();
-        csvContent = json.contents;
-      } else {
-        csvContent = await response.text();
-      }
-
-      if (!csvContent || csvContent.length < 100) continue;
+      const csvContent = await response.text();
+      if (!csvContent || csvContent.length < 50) continue;
 
       const rates = parseBOTCsv(csvContent);
       if (rates['USD']) {
-        BOT_CURRENCIES.forEach(c => {
-          if (!rates[c.code]) {
-            rates[c.code] = fallbackRates[c.code] || 30;
-          }
-        });
-        return rates;
+        return { rates, source: '台銀官方資料 (Live)' };
       }
     } catch (err) {
       console.warn(`Proxy failed:`, err);
     }
   }
 
-  return fallbackRates;
+  return { rates: fallbackRates, source: '預設/快取資料 (Offline)' };
 };
 
 export const saveTransactions = async (transactions: Transaction[]) => {
