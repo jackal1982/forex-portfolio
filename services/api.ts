@@ -46,7 +46,7 @@ export const fetchRatesViaAI = async (): Promise<{rates: Record<string, number>,
 };
 
 /**
- * 透過台灣銀行官方 CSV 獲取即時匯率 (增加更多 Proxy 並優化解析)
+ * 透過台灣銀行官方 CSV 獲取即時匯率
  */
 export const fetchExchangeRates = async (): Promise<{rates: Record<string, number>, source: string}> => {
   const BOT_CSV_URL = 'https://rate.bot.com.tw/xrt/flcsv/0/day';
@@ -69,11 +69,32 @@ export const fetchExchangeRates = async (): Promise<{rates: Record<string, numbe
     
     lines.forEach((line) => {
       const columns = line.split(',');
-      if (columns.length < 15) return;
+      if (columns.length < 4) return; 
 
       const currencyCode = columns[0].trim();
-      // 台銀 CSV 第 13 欄是即時買入價 (Spot Buy)，即我們賣給銀行的價格
-      const spotBuy = parseFloat(columns[13]);
+      const label = columns[1]?.trim(); // "本行買入"
+      
+      /**
+       * 根據截圖確認的 CSV 結構：
+       * [0] 幣別
+       * [1] "本行買入"
+       * [2] 現金買入
+       * [3] 即期買入 (Spot Buy) -> 這是我們要的
+       * ...
+       * [13] 即期賣出 (Spot Sell)
+       */
+      let spotBuy = NaN;
+
+      // 如果第二欄是 "本行買入"，則第三欄 (Index 3) 必為即期買入匯率
+      if (label === "本行買入") {
+        spotBuy = parseFloat(columns[3]);
+      } else {
+        // 備援方案：如果格式不完全符合預期，嘗試尋找數字
+        const val3 = parseFloat(columns[3]);
+        const val9 = parseFloat(columns[9]); // 某些版本的標籤佔位更多
+        if (!isNaN(val3) && val3 > 0) spotBuy = val3;
+        else if (!isNaN(val9) && val9 > 0) spotBuy = val9;
+      }
 
       if (currencyCode && !isNaN(spotBuy) && spotBuy > 0) {
         rates[currencyCode] = spotBuy;
@@ -92,6 +113,7 @@ export const fetchExchangeRates = async (): Promise<{rates: Record<string, numbe
       if (!csvContent || csvContent.length < 50) continue;
 
       const rates = parseBOTCsv(csvContent);
+      // 驗證是否成功抓到 USD
       if (rates['USD']) {
         return { rates, source: '台銀官方資料 (Live)' };
       }
