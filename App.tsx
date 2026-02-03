@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { Transaction, DashboardStats } from './types';
-import { fetchExchangeRates, saveTransactions, loadTransactions, verifyPasswordWithBackend } from './services/api';
+import { fetchExchangeRates, fetchRatesViaAI, saveTransactions, loadTransactions, verifyPasswordWithBackend } from './services/api';
 import { calculatePortfolio } from './services/finance';
 import Dashboard from './components/Dashboard';
 import TransactionForm from './components/TransactionForm';
@@ -15,10 +15,12 @@ const App: React.FC = () => {
   
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [rates, setRates] = useState<Record<string, number>>({});
+  const [dataSource, setDataSource] = useState<string>('Loading...');
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [displayTransactions, setDisplayTransactions] = useState<Transaction[]>([]);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
   const [loading, setLoading] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
   
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
@@ -54,7 +56,7 @@ const App: React.FC = () => {
   const initializeData = useCallback(async () => {
     setLoading(true);
     try {
-      const [savedTxs, currentRates] = await Promise.all([
+      const [savedTxs, rateData] = await Promise.all([
         loadTransactions(),
         fetchExchangeRates()
       ]);
@@ -63,13 +65,27 @@ const App: React.FC = () => {
         id: tx.id || Math.random().toString(36).substr(2, 9)
       }));
       setTransactions(sanitizedTxs);
-      setRates(currentRates);
+      setRates(rateData.rates);
+      setDataSource(rateData.source);
     } catch (err) {
       console.error("Initialization failed", err);
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const handleAiRefresh = async () => {
+    setAiLoading(true);
+    try {
+      const aiData = await fetchRatesViaAI();
+      if (Object.keys(aiData.rates).length > 0) {
+        setRates(aiData.rates);
+        setDataSource(aiData.source);
+      }
+    } finally {
+      setAiLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -157,7 +173,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 relative flex flex-col">
-      {/* 桌面端與手機端共用 Header */}
       <header className="bg-white/80 backdrop-blur-md border-b border-slate-100 sticky top-0 z-[60]">
         <div className="max-w-6xl mx-auto px-6 h-20 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -168,11 +183,9 @@ const App: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-4">
-            {/* 新增交易按鈕 - 始終顯示在 Header 右側，手機端僅顯示圖示 */}
             <button 
               onClick={() => setShowForm(true)}
               className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white p-2.5 sm:px-5 sm:py-2.5 rounded-xl font-bold transition-all shadow-lg shadow-blue-100 active:scale-95"
-              title="新增交易"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
@@ -182,7 +195,6 @@ const App: React.FC = () => {
             <button 
               onClick={() => setShowLogoutConfirm(true)}
               className="w-10 h-10 flex items-center justify-center bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-full transition-all"
-              title="登出系統"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                 <path fillRule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clipRule="evenodd" />
@@ -193,16 +205,40 @@ const App: React.FC = () => {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 md:px-6 py-6 w-full flex-1 pb-24 md:pb-12">
+        {/* 狀態列 */}
+        <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mb-8 bg-white/50 p-4 rounded-3xl border border-slate-100">
+           <div className="flex items-center gap-3">
+             <div className={`w-2 h-2 rounded-full ${dataSource.includes('Offline') ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`}></div>
+             <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">數據來源: <span className="text-slate-800">{dataSource}</span></span>
+           </div>
+           
+           {(dataSource.includes('Offline') || dataSource.includes('Error')) && (
+             <button 
+               onClick={handleAiRefresh}
+               disabled={aiLoading}
+               className="flex items-center gap-2 bg-slate-900 text-white px-4 py-2 rounded-xl text-xs font-bold hover:bg-black transition-all disabled:opacity-50"
+             >
+               {aiLoading ? (
+                 <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+               ) : (
+                 <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                   <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                 </svg>
+               )}
+               {aiLoading ? 'AI 正在搜尋匯率...' : '使用 AI 更新即時匯率'}
+             </button>
+           )}
+        </div>
+
         {loading && (
           <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[70] animate-in fade-in slide-in-from-top-4">
             <div className="bg-white/90 backdrop-blur-sm px-4 py-2 rounded-full shadow-lg border border-slate-100 flex items-center gap-3">
               <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-              <span className="text-xs font-bold text-slate-600">同步最新匯率...</span>
+              <span className="text-xs font-bold text-slate-600">正在同步資料...</span>
             </div>
           </div>
         )}
 
-        {/* 手機版標籤切換 */}
         <div className="flex md:hidden bg-white p-1 rounded-2xl shadow-sm border border-slate-100 mb-6">
           <button 
             onClick={() => setActiveTab('overview')}
@@ -218,7 +254,6 @@ const App: React.FC = () => {
           </button>
         </div>
 
-        {/* 內容區塊 */}
         <div className={`${activeTab === 'overview' ? 'block' : 'hidden md:block'}`}>
           {stats && <Dashboard stats={stats} />}
         </div>
@@ -232,7 +267,6 @@ const App: React.FC = () => {
         </div>
       </main>
 
-      {/* 手機版底部導覽列 */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-md border-t border-slate-100 px-8 py-4 flex justify-around items-center z-50">
         <button onClick={() => setActiveTab('overview')} className={`flex flex-col items-center gap-1 ${activeTab === 'overview' ? 'text-blue-600' : 'text-slate-400'}`}>
           <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -248,7 +282,6 @@ const App: React.FC = () => {
         </button>
       </nav>
 
-      {/* 新增/修改彈窗 */}
       {(showForm || editingTransaction) && (
         <div className="fixed inset-0 z-[100] flex items-end md:items-center justify-center p-0 md:p-4">
           <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" onClick={() => { setShowForm(false); setEditingTransaction(null); }}></div>
@@ -265,7 +298,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* 刪除確認 Modal */}
       {deletingId && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[200] flex items-center justify-center p-6">
           <div className="bg-white rounded-[2.5rem] p-8 max-w-xs w-full shadow-2xl animate-in zoom-in duration-200">
@@ -286,7 +318,6 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* 登出確認 Modal */}
       {showLogoutConfirm && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[200] flex items-center justify-center p-6">
           <div className="bg-white rounded-[2.5rem] p-8 max-w-xs w-full shadow-2xl animate-in zoom-in duration-200">
