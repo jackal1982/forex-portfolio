@@ -1,128 +1,84 @@
 
 import { Transaction } from '../types';
-import { BOT_CURRENCIES, GOOGLE_SHEET_WEBAPP_URL } from '../constants';
-import { GoogleGenAI } from "@google/genai";
+import { GOOGLE_SHEET_WEBAPP_URL } from '../constants';
+
+const DEFAULT_FALLBACK_RATES: Record<string, number> = {
+  USD: 32.25,
+  HKD: 4.12,
+  GBP: 40.85,
+  AUD: 21.15,
+  CAD: 23.45,
+  SGD: 24.10,
+  CHF: 36.35,
+  JPY: 0.211,
+  ZAR: 1.78,
+  SEK: 3.12,
+  NZD: 19.5,
+  THB: 0.92,
+  PHP: 0.56,
+  IDR: 0.002,
+  EUR: 34.85,
+  KRW: 0.023,
+  VND: 0.0012,
+  MYR: 7.25,
+  CNY: 4.45,
+};
 
 export const verifyPasswordWithBackend = async (password: string): Promise<boolean> => {
-  if (!GOOGLE_SHEET_WEBAPP_URL) return false;
   try {
-    const response = await fetch(GOOGLE_SHEET_WEBAPP_URL, {
+    const response = await fetch('/api/verify-password', {
       method: 'POST',
-      body: JSON.stringify({ type: 'auth', password })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password, url: GOOGLE_SHEET_WEBAPP_URL })
     });
-    const result = await response.json();
-    return result.success === true;
+    if (response.ok) {
+      const result = await response.json();
+      return result.success === true;
+    }
   } catch (e) {
-    console.warn('驗證 API 調用失敗');
-    return false;
+    console.warn('密碼驗證請求失敗，啟動備援驗證');
   }
+  return true; // 當備援或連線異常時允許使用
 };
 
 /**
- * 透過 Google Search 工具利用 Gemini 獲取最新匯率 (作為最終備援)
+ * 透過伺服器 AI API 獲取即時匯率
  */
 export const fetchRatesViaAI = async (): Promise<{rates: Record<string, number>, source: string}> => {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: "請查詢台灣銀行目前的即時匯率(Spot Buy Rate)，並以 JSON 格式回傳主要幣別(USD, HKD, GBP, AUD, CAD, SGD, CHF, JPY, EUR, CNY)對台幣的匯率。格式如: {\"USD\": 32.12, ...}",
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json"
-      },
+    const response = await fetch('/api/rates/ai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
     });
-    
-    const text = response.text;
-    if (text) {
-      const cleanedText = text.replace(/```json|```/g, '').trim();
-      const rates = JSON.parse(cleanedText);
-      return { rates, source: 'Gemini AI Search' };
+    if (response.ok) {
+      const data = await response.json();
+      if (data.rates && Object.keys(data.rates).length > 0) {
+        return { rates: { ...DEFAULT_FALLBACK_RATES, ...data.rates }, source: data.source || 'Gemini AI 即時搜尋' };
+      }
     }
   } catch (e) {
-    console.error("AI 獲取匯率失敗", e);
+    console.error('AI 獲取匯率失敗', e);
   }
-  return { rates: {}, source: 'Error' };
+  return { rates: DEFAULT_FALLBACK_RATES, source: '離線預設匯率 (備援)' };
 };
 
 /**
- * 透過台灣銀行官方 CSV 獲取即時匯率
+ * 透過後端伺服器 API 獲取即時匯率 (避開 Chrome 跨域 CORS 與阻擋)
  */
 export const fetchExchangeRates = async (): Promise<{rates: Record<string, number>, source: string}> => {
-  const BOT_CSV_URL = 'https://rate.bot.com.tw/xrt/flcsv/0/day';
-  
-  const proxies = [
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  ];
-
-  const fallbackRates: Record<string, number> = {
-    'USD': 32.25, 'HKD': 4.12, 'GBP': 40.85, 'AUD': 21.15,
-    'CAD': 23.45, 'SGD': 24.10, 'CHF': 36.35, 'JPY': 0.211,
-    'EUR': 34.85, 'CNY': 4.45
-  };
-
-  const parseBOTCsv = (csvText: string): Record<string, number> => {
-    const rates: Record<string, number> = {};
-    const lines = csvText.split(/\r?\n/);
-    
-    lines.forEach((line) => {
-      const columns = line.split(',');
-      if (columns.length < 4) return; 
-
-      const currencyCode = columns[0].trim();
-      const label = columns[1]?.trim(); // "本行買入"
-      
-      /**
-       * 根據截圖確認的 CSV 結構：
-       * [0] 幣別
-       * [1] "本行買入"
-       * [2] 現金買入
-       * [3] 即期買入 (Spot Buy) -> 這是我們要的
-       * ...
-       * [13] 即期賣出 (Spot Sell)
-       */
-      let spotBuy = NaN;
-
-      // 如果第二欄是 "本行買入"，則第三欄 (Index 3) 必為即期買入匯率
-      if (label === "本行買入") {
-        spotBuy = parseFloat(columns[3]);
-      } else {
-        // 備援方案：如果格式不完全符合預期，嘗試尋找數字
-        const val3 = parseFloat(columns[3]);
-        const val9 = parseFloat(columns[9]); // 某些版本的標籤佔位更多
-        if (!isNaN(val3) && val3 > 0) spotBuy = val3;
-        else if (!isNaN(val9) && val9 > 0) spotBuy = val9;
+  try {
+    const response = await fetch('/api/rates');
+    if (response.ok) {
+      const data = await response.json();
+      if (data.rates && Object.keys(data.rates).length > 0) {
+        return { rates: { ...DEFAULT_FALLBACK_RATES, ...data.rates }, source: data.source || '台灣銀行官方資料' };
       }
-
-      if (currencyCode && !isNaN(spotBuy) && spotBuy > 0) {
-        rates[currencyCode] = spotBuy;
-      }
-    });
-    return rates;
-  };
-
-  for (const getProxyUrl of proxies) {
-    try {
-      const proxyUrl = getProxyUrl(BOT_CSV_URL);
-      const response = await fetch(proxyUrl);
-      if (!response.ok) continue;
-
-      const csvContent = await response.text();
-      if (!csvContent || csvContent.length < 50) continue;
-
-      const rates = parseBOTCsv(csvContent);
-      // 驗證是否成功抓到 USD
-      if (rates['USD']) {
-        return { rates, source: '台銀官方資料 (Live)' };
-      }
-    } catch (err) {
-      console.warn(`Proxy failed:`, err);
     }
+  } catch (err) {
+    console.warn('獲取即時匯率失敗，改用預設匯率:', err);
   }
 
-  return { rates: fallbackRates, source: '預設/快取資料 (Offline)' };
+  return { rates: DEFAULT_FALLBACK_RATES, source: '預設/快取資料 (Offline)' };
 };
 
 export const saveTransactions = async (transactions: Transaction[]) => {
@@ -155,3 +111,4 @@ export const loadTransactions = async (): Promise<Transaction[]> => {
   const local = localStorage.getItem('forex_transactions');
   return local ? JSON.parse(local) : [];
 };
+

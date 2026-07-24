@@ -1,5 +1,6 @@
 {
   "name": "Forex Portfolio Pro",
   "description": "A sophisticated foreign currency investment tracker with real-time profit/loss calculation, history management, and Google Sheets integration.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
